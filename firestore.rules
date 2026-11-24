@@ -1,0 +1,286 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ==========================================
+    // FUNCIONES AUXILIARES DE AUTENTICACIÓN Y ROLES
+    // ==========================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isEmailVerified() {
+      return isAuthenticated() && request.auth.token.email_verified == true;
+    }
+
+    function getRol() {
+      return request.auth.token.rol;
+    }
+
+    function isAdmin() {
+      return isEmailVerified() && getRol() == 'admin';
+    }
+
+    function isProfesor() {
+      return isEmailVerified() && getRol() == 'profesor';
+    }
+
+    function isAMPA() {
+      return isEmailVerified() && getRol() == 'ampa';
+    }
+
+    function isTrabajador() {
+      return isEmailVerified() && getRol() == 'trabajador';
+    }
+
+    function isPadre() {
+      return isEmailVerified() && getRol() == 'padre';
+    }
+
+    function hasCurso(cursoId) {
+      return request.auth.token.cursos != null && cursoId in request.auth.token.cursos;
+    }
+
+    function hasGrupo(grupoId) {
+      return request.auth.token.grupos != null && grupoId in request.auth.token.grupos;
+    }
+
+    function hasPermiso(permisoKey) {
+      return isEmailVerified() && request.auth.token.permisos != null && request.auth.token.permisos[permisoKey] == true;
+    }
+
+    // ==========================================
+    // 1. CONFIGURACIÓN DEL CENTRO Y HORARIOS DE SILENCIO
+    // ==========================================
+    match /configuracion_centro/{docId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+
+    // ==========================================
+    // 2. PERFILES DE USUARIO Y ASIGNACIÓN DE ROLES
+    // ==========================================
+    match /usuarios/{userId} {
+      allow read: if isEmailVerified() && (
+        request.auth.uid == userId ||
+        isAdmin() ||
+        isProfesor() ||
+        isAMPA()
+      );
+      // El propio usuario puede registrarse inicialmente en estado 'pendiente'
+      allow create: if isAuthenticated() && request.auth.uid == userId;
+      // Actualizar solo datos propios (sin poder escalarse rol ni cursos)
+      allow update: if isAuthenticated() && request.auth.uid == userId &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['rol', 'cursos', 'grupos', 'activo']) ||
+        isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // ==========================================
+    // 3. CURSOS ESCOLARES
+    // ==========================================
+    match /cursos/{cursoId} {
+      allow read: if isEmailVerified();
+      allow write: if isAdmin();
+    }
+
+    // ==========================================
+    // 3.1. GRUPOS PERSONALIZADOS (COMEDOR, TRANSPORTE, DELEGADOS, ETC.)
+    // ==========================================
+    match /grupos/{grupoId} {
+      allow read: if isEmailVerified();
+      allow write: if isAdmin();
+    }
+
+    // ==========================================
+    // 4. ALUMNOS Y VINCULACIÓN FAMILIAR
+    // ==========================================
+    match /alumnos/{alumnoId} {
+      allow read: if isEmailVerified() && (
+        isAdmin() ||
+        (isProfesor() && (resource.data.tutorUid == request.auth.uid || hasCurso(resource.data.cursoId))) ||
+        (isPadre() && resource.data.progenitores != null)
+      );
+      allow write: if isAdmin();
+    }
+
+    // ==========================================
+    // 5. TABLÓN DE AVISOS Y CONFIRMACIONES DE LECTURA (1 CLIC)
+    // ==========================================
+    match /avisos/{avisoId} {
+      allow read: if isEmailVerified() && (
+        isAdmin() ||
+        resource.data.alcance == 'TODOS' ||
+        hasCurso(resource.data.alcance) ||
+        hasGrupo(resource.data.alcance) ||
+        isProfesor() ||
+        isAMPA()
+      );
+      allow create: if isEmailVerified() && (
+        isAdmin() ||
+        (isProfesor() && hasCurso(request.resource.data.alcance)) ||
+        (isAMPA() && request.resource.data.tipoEmisor == 'ampa') ||
+        hasPermiso('puedePublicarAvisos')
+      );
+      allow update, delete: if isEmailVerified() && (
+        isAdmin() ||
+        (resource.data.remitenteUid == request.auth.uid)
+      );
+
+      // Subcolección de confirmaciones de lectura rápida ("He leído y enterado")
+      match /confirmaciones/{uidPadre} {
+        allow read: if isEmailVerified() && (
+          isAdmin() ||
+          isProfesor() ||
+          request.auth.uid == uidPadre
+        );
+        allow create, update: if isEmailVerified() && isPadre() && request.auth.uid == uidPadre;
+        allow delete: if isAdmin();
+      }
+    }
+
+    // ==========================================
+    // 6. EXPEDIENTES DE FIRMAS Y AUTORIZACIONES (EXCURSIONES)
+    // ==========================================
+    match /firmas_autorizaciones/{expedienteId} {
+      allow read: if isEmailVerified() && (
+        isAdmin() ||
+        isProfesor() ||
+        (isPadre() && hasCurso(resource.data.cursoId))
+      );
+      allow create: if isEmailVerified() && (isAdmin() || isProfesor());
+      allow update: if isEmailVerified() && (
+        isAdmin() ||
+        // Un padre solo añade su firma con DNI y estado
+        (isPadre() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['firmas', 'estado']))
+      );
+      allow delete: if isAdmin();
+    }
+
+    // ==========================================
+    // 7. ENCUESTAS Y VOTACIONES CON VOTO ÚNICO POR UID
+    // ==========================================
+    match /encuestas/{encuestaId} {
+      allow read: if isEmailVerified() && (
+        isAdmin() ||
+        resource.data.alcance == 'TODOS' ||
+        hasCurso(resource.data.alcance) ||
+        hasGrupo(resource.data.alcance) ||
+        isProfesor()
+      );
+      allow create, update, delete: if isAdmin() || isProfesor() || hasPermiso('puedePublicarEncuestas');
+
+      // Subcolección de votos únicos por padre (clave doc = UID del padre)
+      match /votos/{uidPadre} {
+        allow read: if isEmailVerified() && (
+          isAdmin() ||
+          isProfesor() ||
+          request.auth.uid == uidPadre ||
+          get(/databases/$(database)/documents/encuestas/$(encuestaId)).data.resultadosPublicos == true
+        );
+        // Solo puede votar mientras la encuesta siga abierta (request.time < fechaCierre)
+        allow create, update: if isEmailVerified() && isPadre() &&
+          request.auth.uid == uidPadre &&
+          request.time < timestamp.date(get(/databases/$(database)/documents/encuestas/$(encuestaId)).data.fechaCierre);
+        allow delete: if isAdmin();
+      }
+    }
+
+    // ==========================================
+    // 8. CALENDARIO DE EVENTOS ESCOLARES (SINCRONIZABLE .ICS)
+    // ==========================================
+    match /eventos/{eventoId} {
+      allow read: if isEmailVerified() && (
+        isAdmin() ||
+        resource.data.alcance == 'TODOS' ||
+        hasCurso(resource.data.alcance) ||
+        hasGrupo(resource.data.alcance) ||
+        isProfesor()
+      );
+      allow create, update, delete: if isAdmin() || isProfesor() || hasPermiso('puedePublicarEncuestas');
+    }
+
+    // ==========================================
+    // 9. JUSTIFICANTE RÁPIDO DE FALTAS Y RETRASOS
+    // ==========================================
+    match /ausencias/{ausenciaId} {
+      allow read: if isEmailVerified() && (
+        isAdmin() ||
+        (isProfesor() && hasCurso(resource.data.cursoId)) ||
+        (isPadre() && resource.data.progenitorUid == request.auth.uid)
+      );
+      // El padre envía el justificante con observación acotada a 500 caracteres
+      allow create: if isEmailVerified() && isPadre() &&
+        request.resource.data.progenitorUid == request.auth.uid &&
+        request.resource.data.observacion is string &&
+        request.resource.data.observacion.size() <= 500;
+      // Solo el colegio o tutor puede actualizar el estado (justificada/rechazada) o comentar
+      allow update: if isEmailVerified() && (isAdmin() || isProfesor());
+      allow delete: if isAdmin();
+    }
+
+    // ==========================================
+    // 10. TABLÓN DE RECURSOS Y ENLACES EXTERNOS (CERO ALMACENAMIENTO)
+    // ==========================================
+    match /recursos/{recursoId} {
+      allow read: if isEmailVerified();
+      allow write: if isAdmin();
+    }
+
+    // ==========================================
+    // 11. MENSAJERÍA DIRECTA CON TUTOR (CANALES AISLADOS)
+    // ==========================================
+    match /conversaciones/{conversacionId} {
+      allow read: if isEmailVerified() && (
+        isAdmin() ||
+        resource.data.progenitorUid == request.auth.uid ||
+        resource.data.destinatarioUid == request.auth.uid ||
+        (isAMPA() && resource.data.tipoCanal == 'ampa')
+      );
+      allow create: if isEmailVerified() && (
+        isAdmin() ||
+        request.resource.data.progenitorUid == request.auth.uid ||
+        request.resource.data.destinatarioUid == request.auth.uid
+      );
+      allow update: if isEmailVerified() && (
+        isAdmin() ||
+        resource.data.progenitorUid == request.auth.uid ||
+        resource.data.destinatarioUid == request.auth.uid ||
+        (isAMPA() && resource.data.tipoCanal == 'ampa')
+      );
+      allow delete: if isAdmin();
+
+      // Subcolección de mensajes individuales (límite 500 caracteres, inmutables)
+      match /mensajes/{mensajeId} {
+        allow read: if isEmailVerified() && (
+          isAdmin() ||
+          get(/databases/$(database)/documents/conversaciones/$(conversacionId)).data.progenitorUid == request.auth.uid ||
+          get(/databases/$(database)/documents/conversaciones/$(conversacionId)).data.destinatarioUid == request.auth.uid ||
+          (isAMPA() && get(/databases/$(database)/documents/conversaciones/$(conversacionId)).data.tipoCanal == 'ampa')
+        );
+        allow create: if isEmailVerified() &&
+          request.resource.data.remitenteUid == request.auth.uid &&
+          request.resource.data.texto is string &&
+          request.resource.data.texto.size() > 0 &&
+          request.resource.data.texto.size() <= 500 &&
+          // Si el canal tiene respuestas desactivadas (aviso unidireccional), solo el docente/admin puede escribir
+          (
+            get(/databases/$(database)/documents/conversaciones/$(conversacionId)).data.respuestasDesactivadas != true ||
+            isAdmin() ||
+            isProfesor()
+          );
+        // Inmutabilidad estricta: una vez enviado, no se puede alterar ni borrar
+        allow update, delete: if false;
+      }
+    }
+
+    // ==========================================
+    // 12. COLA DE NOTIFICACIONES PUSH (DISPARADOR LOCAL PC)
+    // ==========================================
+    match /cola_notificaciones/{notifId} {
+      allow read: if isAdmin();
+      allow create: if isEmailVerified() && request.resource.data.estado == 'pendiente';
+      allow update, delete: if isAdmin();
+    }
+  }
+}

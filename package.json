@@ -1,0 +1,24 @@
+{
+  "name": "molinillo",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "npm --workspace=apps/web-pwa run dev -- --host",
+    "dev:desktop": "npm --workspace=apps/desktop run dev",
+    "build:shared": "npm --workspace=packages/shared run build",
+    "build:web": "npm --workspace=apps/web-pwa run build",
+    "build:desktop": "npm --workspace=apps/desktop run build"
+  },
+  "keywords": [
+    "school-messaging",
+    "pwa",
+    "firebase",
+    "electron"
+  ],
+  "author": "Molinillo Team",
+  "license": "MIT"
+}

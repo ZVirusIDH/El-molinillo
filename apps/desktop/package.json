@@ -1,0 +1,20 @@
+{
+  "name": "@molinillo/desktop",
+  "version": "1.0.0",
+  "private": true,
+  "main": "dist-electron/main/index.js",
+  "scripts": {
+    "build": "tsc",
+    "build:electron": "tsc",
+    "dev": "echo Desktop packaging ready when web tests complete"
+  },
+  "dependencies": {
+    "@molinillo/shared": "*",
+    "firebase-admin": "^12.1.0"
+  },
+  "devDependencies": {
+    "electron": "^30.0.9",
+    "electron-builder": "^24.13.3",
+    "typescript": "^5.4.5"
+  }
+}
